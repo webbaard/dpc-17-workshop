@@ -24,9 +24,17 @@ use Prooph\ServiceBus\Message\Bernard\BernardSerializer;
 use Prooph\ServiceBus\Plugin\Router\CommandRouter;
 use Prooph\ServiceBus\Plugin\Router\EventRouter;
 use Rhumsaa\Uuid\Uuid;
+use Workshop\Domain\Command\BlockCard;
+use Workshop\Domain\Command\ChangeLimit;
 use Workshop\Domain\Command\LoadMoney;
+use Workshop\Domain\Command\PayMoney;
 use Workshop\Domain\Command\RegisterPrepaidCard;
+use Workshop\Domain\Command\UnblockCard;
+use Workshop\Domain\Events\LimitChanged;
 use Workshop\Domain\Events\MoneyLoaded;
+use Workshop\Domain\Events\MoneyPayed;
+use Workshop\Domain\Exceptions\CardIsBlocked;
+use Workshop\Domain\Exceptions\LowBalance;
 use Workshop\Domain\PrepaidCard;
 use Workshop\Infrastructure\ESPrepaidCardRepository;
 
@@ -39,7 +47,7 @@ $connectionParams = array(
     'user' => 'root',
     'password' => 'root',
     'host' => '127.0.0.1',
-    'port' => 32769,
+    'port' => 3306,
     'driver' => 'pdo_mysql',
 );
 
@@ -83,7 +91,6 @@ $prepaidCardRepository = new ESPrepaidCardRepository(
         new AggregateTranslator()
     )
 );
-
 // Command bus setup
 $commandBus = new CommandBus();
 $transactionManager = new TransactionManager();
@@ -108,9 +115,62 @@ $commandRouter
     ->route(LoadMoney::class)
     ->to(function (LoadMoney $command) use ($prepaidCardRepository) {
         $card = $prepaidCardRepository->get(Uuid::fromString($command->cardId()));
+        try{
+            $card->load(new Money($command->amount(), new Currency($command->currency())));
+        } catch (Exception $exception) {
+            echo sprintf('wrong');
+            echo PHP_EOL;
+        }
 
-        $card->load(new Money($command->amount(), new Currency($command->currency())));
+        $prepaidCardRepository->save($card);
+    });
 
+$commandRouter
+    ->route(PayMoney::class)
+    ->to(function (PayMoney $command) use ($prepaidCardRepository) {
+        $card = $prepaidCardRepository->get(Uuid::fromString($command->cardId()));
+        try{
+            $card->pay(new Money($command->amount(), new Currency($command->currency())));
+        } catch (Exception $exception) {
+            echo sprintf('wrong');
+            echo PHP_EOL;
+        }
+        $prepaidCardRepository->save($card);
+    });
+
+$commandRouter
+    ->route(BlockCard::class)
+    ->to(function (BlockCard $command) use ($prepaidCardRepository) {
+        $card = $prepaidCardRepository->get(Uuid::fromString($command->cardId()));
+        try{
+            $card->block();
+        } catch (Exception $exception) {
+            echo sprintf('wrong');
+            echo PHP_EOL;
+        }
+        $prepaidCardRepository->save($card);
+    });
+
+$commandRouter
+    ->route(UnblockCard::class)
+    ->to(function (UnblockCard $command) use ($prepaidCardRepository) {
+        $card = $prepaidCardRepository->get(Uuid::fromString($command->cardId()));
+
+        $card->unblock();
+
+        $prepaidCardRepository->save($card);
+    });
+
+$commandRouter
+    ->route(ChangeLimit::class)
+    ->to(function (ChangeLimit $command) use ($prepaidCardRepository) {
+        $card = $prepaidCardRepository->get(Uuid::fromString($command->cardId()));
+        try {
+            $card->changeDailyLimit(new Money($command->limit(), new Currency('EUR')));
+        } catch (Exception $exception) {
+            echo sprintf('wrong');
+            echo PHP_EOL;
+        }
         $prepaidCardRepository->save($card);
     });
 
@@ -121,17 +181,39 @@ $eventRouter
        echo PHP_EOL;
     });
 
+$eventRouter
+    ->route(MoneyPayed::class)
+    ->to(function (MoneyPayed $event) {
+       echo sprintf('Money payed: ' . $event->amount() . ' ' . $event->currency());
+       echo PHP_EOL;
+    });
+
+
 // Command dispatching
 $cardId = '7217974b-4455-4d98-8ce7-a19376f6f362';
 
-$command = RegisterPrepaidCard::from('12345-12345-12345', 'EUR');
+//$command = RegisterPrepaidCard::from('12345-12345-12345', 'EUR');
 
-$commandBus->dispatch($command);
-$commandBus->dispatch(LoadMoney::from($cardId, 10, 'EUR'));
-$commandBus->dispatch(LoadMoney::from($cardId, 20, 'EUR'));
-$commandBus->dispatch(LoadMoney::from($cardId, 20, 'EUR'));
+//$commandBus->dispatch($command);
 
-// Iteration about the history of all events
-foreach ($eventStore->load(new StreamName('event_stream'))->streamEvents() as $event) {
-    $eventBus->dispatch($event);
+try {
+    $commandBus->dispatch(LoadMoney::from($cardId, 100, 'EUR'));
+    $commandBus->dispatch(BlockCard::from($cardId));
+    $commandBus->dispatch(PayMoney::from($cardId, 20, 'EUR'));
+    $commandBus->dispatch(UnblockCard::from($cardId));
+    $commandBus->dispatch(PayMoney::from($cardId, 200, 'EUR'));
+    $commandBus->dispatch(ChangeLimit::from($cardId, 200));
+} catch (CardIsBlocked $exception) {
+    echo sprintf('Card Blocked');
+    echo PHP_EOL;
+} catch (LowBalance $exception) {
+    echo sprintf('Low Amount');
+    echo PHP_EOL;
 }
+
+//// Iteration about the history of all events
+//foreach ($eventStore->load(new StreamName('event_stream'))->streamEvents() as $event) {
+//    $eventBus->dispatch($event);
+//}
+
+var_dump($prepaidCardRepository->get(Uuid::fromString($cardId)));

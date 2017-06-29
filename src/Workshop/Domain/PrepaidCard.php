@@ -6,8 +6,14 @@ use Money\Currency;
 use Money\Money;
 use Prooph\EventSourcing\AggregateRoot;
 use Rhumsaa\Uuid\Uuid;
+use Workshop\Domain\Events\CardBlocked;
+use Workshop\Domain\Events\CardUnblocked;
+use Workshop\Domain\Events\LimitChanged;
 use Workshop\Domain\Events\MoneyLoaded;
+use Workshop\Domain\Events\MoneyPayed;
 use Workshop\Domain\Events\PrepaidCardRegistered;
+use Workshop\Domain\Exceptions\CardIsBlocked;
+use Workshop\Domain\Exceptions\LowBalance;
 
 class PrepaidCard extends AggregateRoot
 {
@@ -26,6 +32,16 @@ class PrepaidCard extends AggregateRoot
      */
     private $balance;
 
+    /**
+     * @var bool
+     */
+    private $blocked = false;
+
+    /**
+     * @var int
+     */
+    private $limit = 1000;
+
     public static function register(string $number, string $currency)
     {
         $self = new self();
@@ -43,6 +59,9 @@ class PrepaidCard extends AggregateRoot
 
     public function load(Money $moneyToLoad)
     {
+        if ($this->blocked === true) {
+            throw new CardIsBlocked();
+        }
         $this->recordThat(
             MoneyLoaded::from(
                 $this->id,
@@ -52,24 +71,56 @@ class PrepaidCard extends AggregateRoot
         );
     }
 
-    public function pay(/* ... */)
+    public function pay(Money $moneyToPay)
     {
-        // @todo Record event...
+        if ($this->blocked === true) {
+            throw new CardIsBlocked();
+        }
+        if ($this->balance->getAmount() < $moneyToPay->getAmount()) {
+            throw new LowBalance();
+        }
+        $this->recordThat(
+            MoneyPayed::from(
+                $this->id,
+                $moneyToPay->getAmount(),
+                $moneyToPay->getCurrency()
+            )
+        );
     }
 
-    public function block(/* ... */)
+    public function block()
     {
-        // @todo Record event...
+        if ($this->blocked === true) {
+            throw new CardIsBlocked();
+        }
+
+        $this->recordThat(
+            CardBlocked::from(
+                $this->id
+            )
+        );
     }
 
-    public function unblock(/* ... */)
+    public function unblock()
     {
-        // @todo Record event...
+        $this->recordThat(
+            CardUnblocked::from(
+                $this->id
+            )
+        );
     }
 
-    public function changeDailyLimit(/* ... */)
+    public function changeDailyLimit(Money $limit)
     {
-        // @todo Record event...
+        if ($this->blocked === true) {
+            throw new CardIsBlocked();
+        }
+        $this->recordThat(
+            LimitChanged::from(
+                $this->id,
+                $limit->getAmount()
+            )
+        );
     }
 
     public function unregister(/* ... */)
@@ -106,7 +157,27 @@ class PrepaidCard extends AggregateRoot
             new Currency($event->currency())
         ));
     }
+
+    protected function whenMoneyPayed(MoneyPayed $event)
+    {
+        $this->balance = $this->balance->subtract(new Money(
+            $event->amount(),
+            new Currency($event->currency())
+        ));
+    }
+
+    protected function whenCardBlocked(CardBlocked $event)
+    {
+        $this->blocked = true;
+    }
+
+    protected function whenCardUnblocked(CardUnblocked $event)
+    {
+        $this->blocked = false;
+    }
+
+    protected function whenLimitChanged(LimitChanged $event)
+    {
+        $this->limit = $event->limit();
+    }
 }
-
-
-//
