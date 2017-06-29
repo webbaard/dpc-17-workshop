@@ -2,6 +2,8 @@
 
 use Doctrine\DBAL\DriverManager;
 use Doctrine\DBAL\Schema\SchemaException;
+use Money\Currency;
+use Money\Money;
 use Prooph\Common\Event\ProophActionEventEmitter;
 use Prooph\Common\Messaging\FQCNMessageFactory;
 use Prooph\Common\Messaging\NoOpMessageConverter;
@@ -21,6 +23,12 @@ use Prooph\ServiceBus\Message\Bernard\BernardMessageProducer;
 use Prooph\ServiceBus\Message\Bernard\BernardSerializer;
 use Prooph\ServiceBus\Plugin\Router\CommandRouter;
 use Prooph\ServiceBus\Plugin\Router\EventRouter;
+use Rhumsaa\Uuid\Uuid;
+use Workshop\Domain\Command\LoadMoney;
+use Workshop\Domain\Command\RegisterPrepaidCard;
+use Workshop\Domain\Events\MoneyLoaded;
+use Workshop\Domain\PrepaidCard;
+use Workshop\Infrastructure\ESPrepaidCardRepository;
 
 require_once __DIR__ . '/vendor/autoload.php';
 
@@ -68,7 +76,7 @@ $eventRouter->attach($eventBus->getActionEventEmitter());
 (new EventPublisher($eventBus))->setUp($eventStore);
 
 // Repository
-$prepaidCardRepository = new PrepaidCardRepository(
+$prepaidCardRepository = new ESPrepaidCardRepository(
     new AggregateRepository(
         $eventStore,
         AggregateType::fromAggregateRootClass(PrepaidCard::class),
@@ -88,5 +96,42 @@ $commandRouter = new CommandRouter();
 $commandRouter->attach($commandBus->getActionEventEmitter());
 
 // Events and commands routing setup
+$commandRouter
+    ->route(RegisterPrepaidCard::class)
+    ->to(function (RegisterPrepaidCard $command) use ($prepaidCardRepository) {
+        $card = PrepaidCard::register($command->number(), $command->currency());
+
+        $prepaidCardRepository->save($card);
+    });
+
+$commandRouter
+    ->route(LoadMoney::class)
+    ->to(function (LoadMoney $command) use ($prepaidCardRepository) {
+        $card = $prepaidCardRepository->get(Uuid::fromString($command->cardId()));
+
+        $card->load(new Money($command->amount(), new Currency($command->currency())));
+
+        $prepaidCardRepository->save($card);
+    });
+
+$eventRouter
+    ->route(MoneyLoaded::class)
+    ->to(function (MoneyLoaded $event) {
+       echo sprintf('Money loaded: ' . $event->amount() . ' ' . $event->currency());
+       echo PHP_EOL;
+    });
 
 // Command dispatching
+$cardId = '7217974b-4455-4d98-8ce7-a19376f6f362';
+
+$command = RegisterPrepaidCard::from('12345-12345-12345', 'EUR');
+
+$commandBus->dispatch($command);
+$commandBus->dispatch(LoadMoney::from($cardId, 10, 'EUR'));
+$commandBus->dispatch(LoadMoney::from($cardId, 20, 'EUR'));
+$commandBus->dispatch(LoadMoney::from($cardId, 20, 'EUR'));
+
+// Iteration about the history of all events
+foreach ($eventStore->load(new StreamName('event_stream'))->streamEvents() as $event) {
+    $eventBus->dispatch($event);
+}
